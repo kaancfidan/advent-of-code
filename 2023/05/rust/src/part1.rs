@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Read};
 
 #[derive(Debug)]
 pub struct Almanac {
-    pub seeds: Vec<u64>,
+    seeds: Vec<u64>,
     connections: Vec<Connection>,
 }
 
@@ -95,6 +95,16 @@ impl Almanac {
             }
         }
 
+        if almanac.seeds.is_empty() {
+            return Err(AlmanacParseError::FormError("Seeds empty".to_string()));
+        }
+
+        if almanac.connections.is_empty() {
+            return Err(AlmanacParseError::FormError(
+                "Connections empty".to_string(),
+            ));
+        }
+
         Ok(almanac)
     }
 
@@ -118,8 +128,12 @@ impl Almanac {
         curr
     }
 
-    fn parse_seeds(line: &String) -> Option<Vec<u64>> {
-        let cap = SEEDS_REGEX.captures(&line)?;
+    pub fn closest_seed_loc(&self) -> Option<u64> {
+        self.seeds.iter().map(|s| self.find_location(*s)).min()
+    }
+
+    fn parse_seeds(line: &str) -> Option<Vec<u64>> {
+        let cap = SEEDS_REGEX.captures(line)?;
         Some(
             cap[1]
                 .split(' ')
@@ -128,8 +142,8 @@ impl Almanac {
         )
     }
 
-    fn parse_header(line: &String) -> Option<Connection> {
-        let cap = CONNECTION_HEADER_REGEX.captures(&line)?;
+    fn parse_header(line: &str) -> Option<Connection> {
+        let cap = CONNECTION_HEADER_REGEX.captures(line)?;
         Some(Connection {
             src: cap[1].to_string(),
             dst: cap[2].to_string(),
@@ -137,8 +151,8 @@ impl Almanac {
         })
     }
 
-    fn parse_exception(line: &String) -> Option<ConnectionException> {
-        let cap = CONNECTION_EXCEPTION_REGEX.captures(&line)?;
+    fn parse_exception(line: &str) -> Option<ConnectionException> {
+        let cap = CONNECTION_EXCEPTION_REGEX.captures(line)?;
         Some(ConnectionException {
             dst: cap[1].parse().unwrap(),
             src: cap[2].parse().unwrap(),
@@ -194,5 +208,7 @@ humidity-to-location map:
         assert_eq!(43, a.find_location(14));
         assert_eq!(86, a.find_location(55));
         assert_eq!(35, a.find_location(13));
+
+        assert_eq!(Some(35), a.closest_seed_loc());
     }
 }

@@ -6,29 +6,28 @@ use std::io::{BufRead, BufReader, Read};
 
 #[derive(Debug)]
 pub struct Almanac {
-    pub seeds: Vec<SeedRange>,
-    pub connections: Vec<Connection>,
+    seed_ranges: Vec<SeedRange>,
+    connections: Vec<Connection>,
 }
 
 #[derive(Debug)]
-pub struct SeedRange {
-    pub start: u64,
-    pub count: u64,
+struct SeedRange {
+    start: u64,
+    count: u64,
 }
 
 #[derive(Debug)]
-pub struct Connection {
+struct Connection {
     src: String,
     dst: String,
-    pub exceptions: Vec<ConnectionException>,
+    exceptions: Vec<ConnectionException>,
 }
 
-#[derive(Debug)]
-#[derive(Clone)]
-pub struct ConnectionException {
-    pub src: u64,
-    pub dst: u64,
-    pub count: u64,
+#[derive(Debug, Clone)]
+struct ConnectionException {
+    src: u64,
+    dst: u64,
+    count: u64,
 }
 
 lazy_static! {
@@ -57,7 +56,7 @@ impl Error for AlmanacParseError {}
 impl Almanac {
     pub fn parse_from_stream(input: &mut impl Read) -> Result<Almanac, AlmanacParseError> {
         let mut almanac = Almanac {
-            seeds: vec![],
+            seed_ranges: vec![],
             connections: vec![],
         };
 
@@ -70,9 +69,9 @@ impl Almanac {
                 continue;
             }
 
-            if almanac.seeds.is_empty() {
+            if almanac.seed_ranges.is_empty() {
                 if let Some(seeds) = Self::parse_seeds(&line) {
-                    almanac.seeds = seeds;
+                    almanac.seed_ranges = seeds;
                     continue;
                 } else {
                     return Err(AlmanacParseError::FormError(
@@ -102,12 +101,32 @@ impl Almanac {
             }
         }
 
+        if almanac.seed_ranges.is_empty() {
+            return Err(AlmanacParseError::FormError(
+                "Seeds ranges empty".to_string(),
+            ));
+        }
+
+        if almanac.connections.is_empty() {
+            return Err(AlmanacParseError::FormError(
+                "Connections empty".to_string(),
+            ));
+        }
+
         Ok(almanac)
     }
 
     pub fn find_location(&self, seed: u64) -> u64 {
-        let mut curr = seed;
-        for c in self.connections.iter() {
+        Self::propagate_forward(seed, self.connections.iter())
+    }
+
+    pub fn find_seed(&self, location: u64) -> u64 {
+        Self::propagate_backwards(location, self.connections.iter())
+    }
+
+    fn propagate_forward<'a>(start: u64, connections: impl Iterator<Item = &'a Connection>) -> u64 {
+        let mut curr = start;
+        for c in connections {
             let next = if let Some(ex) = c
                 .exceptions
                 .iter()
@@ -125,9 +144,12 @@ impl Almanac {
         curr
     }
 
-    pub fn find_seed(&self, location: u64) -> u64 {
-        let mut curr = location;
-        for c in self.connections.iter().rev() {
+    fn propagate_backwards<'a>(
+        start: u64,
+        connections: impl DoubleEndedIterator<Item = &'a Connection>,
+    ) -> u64 {
+        let mut curr = start;
+        for c in connections.rev() {
             let prev = if let Some(ex) = c
                 .exceptions
                 .iter()
@@ -145,8 +167,101 @@ impl Almanac {
         curr
     }
 
-    fn parse_seeds(line: &String) -> Option<Vec<SeedRange>> {
-        let cap = SEEDS_REGEX.captures(&line)?;
+    #[allow(unused)]
+    pub fn closest_seed_loc_reverse(&self) -> Option<u64> {
+        if self.connections.is_empty() {
+            return None;
+        }
+
+        let loc_conn = self.connections.last().unwrap();
+
+        let mut exceptions = loc_conn.exceptions.clone();
+        exceptions.sort_by(|a, b| b.dst.cmp(&a.dst));
+
+        let last_ex = exceptions.first().unwrap();
+        let max_loc = last_ex.dst + last_ex.count;
+
+        (0..max_loc).find(|loc| {
+            let s = self.find_seed(*loc);
+            self.seed_ranges
+                .iter()
+                .any(|r| s >= r.start && s < r.start + r.count)
+        })
+    }
+
+    pub fn closest_seed_loc_optimized(&self) -> Option<u64> {
+        if self.connections.is_empty() {
+            return None;
+        }
+
+        println!("------- Building keypoints -------");
+        let mut key_points: Vec<u64> = vec![];
+
+        let loc_key_points: Vec<u64> = self
+            .connections
+            .last()
+            .unwrap()
+            .exceptions
+            .iter()
+            .flat_map(|e| vec![e.dst, e.dst + e.count])
+            .collect();
+
+        key_points.push(0); // ensure 0 is in.
+        key_points.extend(loc_key_points); // add the location connection's native ranges
+
+        println!("Added native location key points: {:?}", key_points);
+
+        // propagate each connection's key points forwards to locations
+        // to find key locations at the end
+        let mut key_points: Vec<_> = self
+            .connections
+            .iter()
+            .enumerate()
+            .flat_map(|(i, c)| {
+                println!("------- Find projections from {} -------", c.src);
+                let mut points: Vec<_> = c
+                    .exceptions
+                    .iter()
+                    .flat_map(|e| vec![e.src, e.src + e.count])
+                    .map(|p| (i, p))
+                    .collect();
+
+                if points[0].1 != 0 {
+                    points.push((i, 0));
+                }
+
+                points.into_iter()
+            })
+            .map(move |(i, p)| Self::propagate_forward(p, self.connections.iter().skip(i)))
+            .collect();
+
+        key_points.sort_unstable();
+        key_points.dedup();
+
+        println!("------- Checking seed ranges -------");
+        key_points
+            .windows(2)
+            .flat_map(|w| {
+                let seed_start = self.find_seed(w[0]);
+                let seed_end = self.find_seed(w[1]);
+
+                self.seed_ranges.iter().filter_map(move |r| {
+                    let intersection = seed_start.max(r.start)..seed_end.min(r.start + r.count);
+                    if intersection.end > intersection.start {
+                        println!("Found intersecting range {:?}", intersection);
+                        Some(vec![intersection.start, intersection.end])
+                    } else {
+                        None
+                    }
+                })
+            })
+            .flatten()
+            .map(|s| self.find_location(s))
+            .min()
+    }
+
+    fn parse_seeds(line: &str) -> Option<Vec<SeedRange>> {
+        let cap = SEEDS_REGEX.captures(line)?;
         Some(
             cap[1]
                 .split(' ')
@@ -161,8 +276,8 @@ impl Almanac {
         )
     }
 
-    fn parse_header(line: &String) -> Option<Connection> {
-        let cap = CONNECTION_HEADER_REGEX.captures(&line)?;
+    fn parse_header(line: &str) -> Option<Connection> {
+        let cap = CONNECTION_HEADER_REGEX.captures(line)?;
         Some(Connection {
             src: cap[1].to_string(),
             dst: cap[2].to_string(),
@@ -170,8 +285,8 @@ impl Almanac {
         })
     }
 
-    fn parse_exception(line: &String) -> Option<ConnectionException> {
-        let cap = CONNECTION_EXCEPTION_REGEX.captures(&line)?;
+    fn parse_exception(line: &str) -> Option<ConnectionException> {
+        let cap = CONNECTION_EXCEPTION_REGEX.captures(line)?;
         Some(ConnectionException {
             dst: cap[1].parse().unwrap(),
             src: cap[2].parse().unwrap(),
@@ -185,9 +300,8 @@ mod tests {
     use super::*;
     use stringreader::StringReader;
 
-    #[test]
-    fn integration_reverse_brute() {
-        let input = "seeds: 79 14 55 13
+    lazy_static! {
+        static ref INPUT: String = "seeds: 79 14 55 13
 
 seed-to-soil map:
 50 98 2
@@ -219,22 +333,22 @@ temperature-to-humidity map:
 
 humidity-to-location map:
 60 56 37
-56 93 4";
+56 93 4"
+            .to_string();
+    }
 
-        let a = Almanac::parse_from_stream(&mut StringReader::new(input)).unwrap();
-        let mut loc_conn = a.connections.last().unwrap();
+    #[test]
+    fn integration_reverse_brute() {
+        let a = Almanac::parse_from_stream(&mut StringReader::new(&INPUT)).unwrap();
+        let closest_loc = a.closest_seed_loc_reverse().unwrap();
+        assert_eq!(46, closest_loc);
+    }
 
-        let mut exceptions = loc_conn.exceptions.clone();
-        exceptions.sort_by(|a,b| b.dst.cmp(&a.dst));
+    #[test]
+    fn integration_optimized() {
+        let a = Almanac::parse_from_stream(&mut StringReader::new(&INPUT)).unwrap();
+        let closest_loc = a.closest_seed_loc_optimized().unwrap();
 
-        let last_ex = exceptions.first().unwrap();
-        let max_loc = last_ex.dst + last_ex.count;
-
-        let min_loc = (0..max_loc).find(|loc| {
-            let s = a.find_seed(*loc);
-            a.seeds.iter().any(|r| s >= r.start && s < r.start + r.count)
-        }).unwrap();
-
-        assert_eq!(46, min_loc);
+        assert_eq!(46, closest_loc);
     }
 }
