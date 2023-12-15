@@ -1,6 +1,7 @@
 mod inventory;
 
 use crate::inventory::Record;
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -42,7 +43,9 @@ fn main() -> Result<(), InputError> {
 
     let reader = BufReader::new(file);
 
-    let mut records: Vec<_> = reader
+    let mut memo = HashMap::new();
+
+    let records: Vec<_> = reader
         .lines()
         .map(|l| {
             let line = l.map_err(InputError::IO)?;
@@ -53,23 +56,21 @@ fn main() -> Result<(), InputError> {
 
     let sum_valid: u64 = records
         .iter()
-        .map(|r| r.valid_configurations().len() as u64)
+        .map(|r| r.valid_configuration_count(&mut memo))
         .sum();
 
     println!("Number of valid configurations: {}", sum_valid);
 
-    for r in records.iter_mut() {
-        r.unfold();
-    }
-
-    let sum_valid: u64 = records
+    let sum_unfolded: u64 = records
         .iter()
-        .map(|r| {
-            r.valid_configurations().len() as u64
-        })
+        .map(|r| r.unfolded(5))
+        .map(|r| r.valid_configuration_count(&mut memo))
         .sum();
 
-    println!("Number of valid configurations after unfolding: {}", sum_valid);
+    println!(
+        "Number of valid configurations after unfolding: {}",
+        sum_unfolded
+    );
 
     Ok(())
 }

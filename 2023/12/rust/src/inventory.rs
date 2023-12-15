@@ -1,11 +1,12 @@
 use lazy_static::lazy_static;
 use regex::Regex;
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
 pub struct Record {
     parts: Vec<Part>,
-    seq: Vec<u8>,
+    seq: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -14,166 +15,132 @@ struct Part {
 }
 
 impl Record {
-    pub fn valid_configurations(&self) -> Vec<Vec<bool>> {
-        Self::explore_configurations(
-            &[],
-            &self
-                .parts
-                .iter()
-                .map(|p| p.damaged)
-                .collect::<Vec<Option<bool>>>(),
-            &self.seq,
-        )
+    pub fn valid_configuration_count(&self, memo: &mut HashMap<String, u64>) -> u64 {
+        // find sequences of # and ? mixes without . in them
+        let seqs: Vec<Vec<Option<bool>>> = self
+            .parts
+            .iter()
+            .map(|p| p.damaged)
+            .collect::<Vec<Option<bool>>>()
+            .split(|b| *b == Some(false))
+            .filter(|g| !g.is_empty())
+            .map(|g| g.to_vec())
+            .collect();
+
+        let ref_seq = self.seq.to_vec();
+
+        Self::memoized_count(&seqs, &ref_seq, memo)
     }
 
-    fn explore_configurations(
-        decided: &[bool],
-        undecided: &[Option<bool>],
-        seq: &[u8],
-    ) -> Vec<Vec<bool>> {
-        if undecided.is_empty() {
-            return if Self::is_valid(decided, seq) {
-                vec![decided.to_vec()]
+    fn memoized_count(
+        config: &[Vec<Option<bool>>],
+        seq: &[usize],
+        memo: &mut HashMap<String, u64>,
+    ) -> u64 {
+        let key = Self::encode_inputs(config, seq);
+        return if let Some(res) = memo.get(&key) {
+            *res
+        } else {
+            let res = Self::count_configurations(config, seq, memo);
+            memo.insert(key, res);
+            res
+        };
+    }
+
+    fn count_configurations(
+        curr: &[Vec<Option<bool>>],
+        seq: &[usize],
+        memo: &mut HashMap<String, u64>,
+    ) -> u64 {
+        if curr.is_empty() {
+            return if seq.is_empty() { 1 } else { 0 };
+        }
+
+        // first group is all #
+        if !curr[0].contains(&None) {
+            // first number in ref sequence must be the same as first group's length
+            return if !seq.is_empty() && seq[0] == curr[0].len() {
+                Self::memoized_count(&curr[1..], &seq[1..], memo)
             } else {
-                vec![]
+                0
             };
         }
 
-        // early prune inconsistencies
-        if Self::is_invalid(decided, seq) {
-            return vec![];
+        // first sequence of #s
+        let count_damaged = curr[0].iter().take_while(|b| **b == Some(true)).count();
+
+        // first sequence of #s already larger than first number in ref sequence
+        if count_damaged > 0 && (seq.is_empty() || count_damaged > seq[0]) {
+            return 0;
         }
 
-        let next_decided: Vec<_> = undecided
-            .iter()
-            .take_while(|d| d.is_some())
-            .map(|d| d.unwrap())
+        // replace 1 unknown with damaged in first group
+        let replaced_damaged = Self::replace_unknown(&curr[0], true);
+        let replaced_ok = Self::replace_unknown(&curr[0], false);
+
+        let ok_split: Vec<Vec<Option<bool>>> = replaced_ok
+            .split(|b| *b == Some(false))
+            .filter(|g| !g.is_empty())
+            .map(|g| g.to_vec())
             .collect();
 
-        if next_decided.len() == undecided.len() {
-            return Self::explore_configurations(
-                &decided
-                    .iter()
-                    .cloned()
-                    .chain(next_decided)
-                    .collect::<Vec<bool>>(),
-                &[],
-                seq,
-            );
-        }
+        let left = [&[replaced_damaged], &curr[1..]].concat();
+        let right = [&ok_split, &curr[1..]].concat();
 
-        let next_undecided: Vec<_> = undecided
+        Self::memoized_count(&left, seq, memo) + Self::memoized_count(&right, seq, memo)
+    }
+
+    fn encode_inputs(curr: &[Vec<Option<bool>>], seq: &[usize]) -> String {
+        let encoded_curr = curr
             .iter()
-            .cloned()
-            .skip(next_decided.len() + 1)
-            .collect();
-
-        Self::explore_configurations(
-            &decided
-                .iter()
-                .cloned()
-                .chain(
-                    next_decided
-                        .iter()
-                        .cloned()
-                        .chain(vec![true])
-                        .collect::<Vec<bool>>(),
-                )
-                .collect::<Vec<bool>>(),
-            &next_undecided,
-            seq,
-        )
-        .into_iter()
-        .chain(Self::explore_configurations(
-            &decided
-                .iter()
-                .cloned()
-                .chain(
-                    next_decided
-                        .iter()
-                        .cloned()
-                        .chain(vec![false])
-                        .collect::<Vec<bool>>(),
-                )
-                .collect::<Vec<bool>>(),
-            &next_undecided,
-            seq,
-        ))
-        .collect()
-    }
-
-    pub fn display(config: &[bool]) -> String {
-        config
-            .iter()
-            .map(|c| if *c { '#' } else { '.' })
-            .collect::<String>()
-    }
-
-    fn is_valid(config: &[bool], seq: &[u8]) -> bool {
-        let config_seq = &Self::find_sequences(config);
-        seq == config_seq
-    }
-
-    fn is_invalid(config: &[bool], seq: &[u8]) -> bool {
-        let config_seq = &Self::find_sequences(config);
-
-        if config_seq.is_empty() {
-            return false;
-        }
-
-        if config_seq.len() > seq.len() {
-            return true;
-        }
-
-        let (last, prev) = config_seq.split_last().unwrap();
-
-        !seq.starts_with(prev)
-            || seq[config_seq.len() - 1] < *last
-            || (seq[config_seq.len() - 1] > *last && !*config.last().unwrap())
-    }
-
-    fn find_sequences(config: &[bool]) -> Vec<u8> {
-        config
-            .split(|&b| !b)
-            .filter_map(|seq| {
-                let len = seq.len();
-                (len > 0).then_some(len as u8)
+            .map(|v| {
+                v.iter()
+                    .map(|b| match b {
+                        None => '?',
+                        Some(true) => '#',
+                        Some(false) => '.',
+                    })
+                    .collect::<String>()
             })
-            .collect()
+            .collect::<Vec<String>>()
+            .join(".");
+
+        let encoded_seq = seq
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        encoded_curr + " " + &encoded_seq
     }
 
-    pub fn unfold(&mut self) {
-        let unknown = Part::try_from('?').unwrap();
+    fn replace_unknown(v: &[Option<bool>], b: bool) -> Vec<Option<bool>> {
+        let mut result = v.to_vec();
 
-        let unfolded_parts: Vec<_> = vec![
-            self.parts.to_vec(),
-            vec![unknown.clone()],
-            self.parts.to_vec(),
-            vec![unknown.clone()],
-            self.parts.to_vec(),
-            vec![unknown.clone()],
-            self.parts.to_vec(),
-            vec![unknown.clone()],
-            self.parts.to_vec(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        if let Some(pos) = result.iter().position(|&x| x.is_none()) {
+            result[pos] = Some(b);
+        }
 
-        self.parts = unfolded_parts;
+        result
+    }
 
-        let unfolded_seq: Vec<_> = vec![
-            self.seq.iter().cloned(),
-            self.seq.iter().cloned(),
-            self.seq.iter().cloned(),
-            self.seq.iter().cloned(),
-            self.seq.iter().cloned(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+    pub fn unfolded(&self, times: u8) -> Record {
+        let unknown = vec![Part::try_from('?').unwrap()];
 
-        self.seq = unfolded_seq;
+        let unfolded_parts: Vec<_> = (0..times - 1).fold(self.parts.clone(), |mut acc, _| {
+            acc = [&acc[..], &unknown.clone()[..], &self.parts.clone()[..]].concat();
+            acc
+        });
+
+        let unfolded_seq: Vec<_> = (0..times - 1).fold(self.seq.clone(), |mut acc, _| {
+            acc = [&acc[..], &self.seq.clone()[..]].concat();
+            acc
+        });
+
+        Record {
+            parts: unfolded_parts,
+            seq: unfolded_seq,
+        }
     }
 }
 
@@ -188,9 +155,9 @@ impl FromStr for Record {
             .map(|c| c.try_into())
             .collect::<Result<Vec<_>, _>>()?;
 
-        let seq: Vec<u8> = cap[2]
+        let seq: Vec<_> = cap[2]
             .split(',')
-            .map(|s| s.parse::<u8>().map_err(|_| ParseError::InvalidForm))
+            .map(|s| s.parse::<usize>().map_err(|_| ParseError::InvalidForm))
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Record { parts, seq })
@@ -250,16 +217,29 @@ mod tests {
     #[case("??????.???##??#?? 2,2,7", 14)]
     #[case("?#?????#.??#?#.????? 1,4,3,1,1,1", 7)]
     #[case(".#????..??.??# 4,1,3", 2)]
-    fn integration(#[case] input: &str, #[case] expectation: usize) {
+    fn integration_count(#[case] input: &str, #[case] expectation: u64) {
         let record = input.parse::<Record>().unwrap();
 
-        let valid_configs = record.valid_configurations();
+        let mut memo = HashMap::new();
+        let count = record.valid_configuration_count(&mut memo);
 
-        println!("{}", input);
-        for config in &valid_configs {
-            println!("{}", Record::display(config))
-        }
+        assert_eq!(expectation, count);
+    }
 
-        assert_eq!(expectation, valid_configs.len())
+    #[rstest]
+    #[case("???.### 1,1,3", 1)]
+    #[case(".??..??...?##. 1,1,3", 16384)]
+    #[case("?#?#?#?#?#?#?#? 1,3,1,6", 1)]
+    #[case("????.#...#... 4,1,1", 16)]
+    #[case("????.######..#####. 1,6,5", 2500)]
+    #[case("?###???????? 3,2,1", 506250)]
+    fn integration_count_unfolded(#[case] input: &str, #[case] expectation: u64) {
+        let record = input.parse::<Record>().unwrap();
+        let unfolded = record.unfolded(5);
+
+        let mut memo = HashMap::new();
+        let count = unfolded.valid_configuration_count(&mut memo);
+
+        assert_eq!(expectation, count);
     }
 }
